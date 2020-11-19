@@ -1,0 +1,5 @@
+*~
+*.bak
+
+/sshbox
+/cmd/sshbox/sshbox
