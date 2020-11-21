@@ -13,6 +13,8 @@ var (
 	bind    string
 	debug   bool
 	version bool
+
+	githubAuth bool
 )
 
 func init() {
@@ -21,10 +23,11 @@ func init() {
 		flag.PrintDefaults()
 	}
 
+	flag.StringVarP(&bind, "bind", "b", ":2222", "interface and port to bind to")
 	flag.BoolVarP(&version, "version", "v", false, "display version information")
 	flag.BoolVarP(&debug, "debug", "d", false, "enable debug logging")
 
-	flag.StringVarP(&bind, "bind", "b", ":2222", "interface and port to bind to")
+	flag.BoolVarP(&githubAuth, "github-auth", "g", false, "use github to authorize keys")
 }
 
 func main() {
@@ -58,7 +61,10 @@ func main() {
 	cmd = args[0]
 	args = args[1:]
 
-	server, err := newServer(bind, keys, cmd, args)
+	server, err := newServer(
+		bind, keys, cmd, args,
+		WithGithubAuth(githubAuth),
+	)
 	if err != nil {
 		log.WithError(err).Error("error creating server")
 		os.Exit(2)

@@ -2,19 +2,27 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
 
 	"github.com/gliderlabs/ssh"
 	"github.com/kr/pty"
+	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
+)
+
+const (
+	GITHUB_KEYSURL = "https://github.com/%s.keys"
 )
 
 func setWinsize(f *os.File, w, h int) {
@@ -22,32 +30,94 @@ func setWinsize(f *os.File, w, h int) {
 		uintptr(unsafe.Pointer(&struct{ h, w, x, y uint16 }{uint16(h), uint16(w), 0, 0})))
 }
 
+func fetchGithubKeys(ctx context.Context, username string) ([]ssh.PublicKey, error) {
+	keyURL := fmt.Sprintf(GITHUB_KEYSURL, username)
+
+	req, err := http.NewRequest("GET", keyURL, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "creating request")
+	}
+
+	req = req.WithContext(ctx)
+
+	client := http.DefaultClient
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "fetching keys")
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != 200 {
+		return nil, errors.New("invalid response from github")
+	}
+
+	authorizedKeysBytes, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "reading body")
+	}
+
+	keys := []ssh.PublicKey{}
+	for len(authorizedKeysBytes) > 0 {
+		pubKey, _, _, rest, err := ssh.ParseAuthorizedKey(authorizedKeysBytes)
+		if err != nil {
+			return nil, errors.Wrap(err, "parsing key")
+		}
+
+		keys = append(keys, pubKey)
+		authorizedKeysBytes = rest
+	}
+
+	return keys, nil
+}
+
+type option func(*server) error
+
+func WithGithubAuth(githubAuth bool) option {
+	return func(s *server) error {
+		s.githubAuth = githubAuth
+		return nil
+	}
+}
+
 type server struct {
 	bind           string
 	cmd            string
 	args           []string
 	authorizedkeys []ssh.PublicKey
+
+	githubAuth bool
 }
 
-func newServer(bind, keys, cmd string, args []string) (*server, error) {
+func newServer(bind, keys, cmd string, args []string, opts ...option) (*server, error) {
 	var authorizedkeys []ssh.PublicKey
 
-	data, err := ioutil.ReadFile(keys)
-	if err != nil {
-		return nil, fmt.Errorf("error reading keys file: %w", err)
+	if strings.HasPrefix(keys, "file://") || fileExists(keys) {
+		keys = strings.TrimPrefix(keys, "file://")
+		data, err := ioutil.ReadFile(keys)
+		if err != nil {
+			return nil, fmt.Errorf("error reading keys file: %w", err)
+		}
+
+		for _, key := range bytes.Split(data, []byte("\n")) {
+			publickey, _, _, _, _ := ssh.ParseAuthorizedKey(key)
+			authorizedkeys = append(authorizedkeys, publickey)
+		}
 	}
 
-	for _, key := range bytes.Split(data, []byte("\n")) {
-		publickey, _, _, _, _ := ssh.ParseAuthorizedKey(key)
-		authorizedkeys = append(authorizedkeys, publickey)
-	}
-
-	return &server{
+	s := &server{
 		bind:           bind,
 		cmd:            cmd,
 		args:           args,
 		authorizedkeys: authorizedkeys,
-	}, nil
+	}
+
+	for _, opt := range opts {
+		if err := opt(s); err != nil {
+			return nil, fmt.Errorf("error applying option: %w", err)
+		}
+	}
+
+	return s, nil
 }
 
 func (s *server) sessionHandler(sess ssh.Session) {
@@ -103,14 +173,29 @@ func (s *server) Run() (err error) {
 
 	sshServer.SetOption(
 		ssh.PublicKeyAuth(func(ctx ssh.Context, key ssh.PublicKey) bool {
+			user := ctx.User()
+
+			if s.githubAuth {
+				keys, err := fetchGithubKeys(ctx, user)
+				if err != nil {
+					log.WithError(err).Warnf("error fetching Github for %s", user)
+				} else {
+					for _, key := range keys {
+						// TODO: Prevent dpulicate keys
+						s.authorizedkeys = append(s.authorizedkeys, key)
+					}
+				}
+			}
+
 			for _, publickey := range s.authorizedkeys {
 				if ssh.KeysEqual(key, publickey) {
+					log.Infof("User %s authorized", user)
 					return true
 				}
 			}
+			log.Warnf("User %s denied", user)
 			return false
-		},
-		),
+		}),
 	)
 
 	go func() {
