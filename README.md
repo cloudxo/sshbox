@@ -9,7 +9,7 @@ lightweight sandboxes.
 ## Usage
 
 ```#!console
-sshbox
+sshbox ~/.ssh/authorized_keys 'box run alpine /bin/sh'
 ```
 
 __NOTE:__ This only works on [uLinux](https://github.com/prologic/ulinux)
