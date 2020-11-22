@@ -22,7 +22,9 @@ import (
 )
 
 const (
-	GITHUB_KEYSURL = "https://github.com/%s.keys"
+	githubKeysURL  = "https://github.com/%s.keys"
+	defaultEnvPath = "/sbin:/usr/sbin:/bin:/usr/bin"
+	defaultEnvHome = "/var/empty"
 )
 
 func setWinsize(f *os.File, w, h int) {
@@ -31,7 +33,7 @@ func setWinsize(f *os.File, w, h int) {
 }
 
 func fetchGithubKeys(ctx context.Context, username string) ([]ssh.PublicKey, error) {
-	keyURL := fmt.Sprintf(GITHUB_KEYSURL, username)
+	keyURL := fmt.Sprintf(githubKeysURL, username)
 
 	req, err := http.NewRequest("GET", keyURL, nil)
 	if err != nil {
@@ -138,12 +140,19 @@ func (s *server) sessionHandler(sess ssh.Session) {
 	cmd := exec.Command(s.cmd, s.args...)
 	log.Debugf("Executing command %s with arguments %s", s.cmd, s.args)
 
+	cmd.Env = append(cmd.Env, []string{
+		fmt.Sprintf("PATH=%s", defaultEnvPath),
+		fmt.Sprintf("HOME=%s", defaultEnvHome),
+	}...)
+
 	ptyReq, winCh, isPty := sess.Pty()
 	if isPty {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", ptyReq.Term))
 		f, err := pty.Start(cmd)
 		if err != nil {
-			panic(err)
+			log.WithError(err).Error("error executing command")
+			sess.Exit(1)
+			return
 		}
 		go func() {
 			for win := range winCh {
