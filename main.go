@@ -70,7 +70,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	log.Infof("sshbox %s listening on %s\n", FullVersion(), bind)
+	log.Infof("sshbox %s listening on %s", FullVersion(), bind)
 	if err = server.Run(); err != nil {
 		log.Fatal(err)
 	}
